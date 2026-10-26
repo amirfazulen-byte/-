@@ -7,7 +7,7 @@ from typing import Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .db import DB
-from .parser import ParseError, parse_visit
+from .parser import ParseError, ParsedVisit, parse_forwarded, parse_visit
 
 HOUR = 3600
 DAY = 24 * HOUR
@@ -87,7 +87,39 @@ def add_visit_from_text(db: DB, master, text: str, now: int, bot_username: str) 
         return Reply(
             f"🤔 {e}.\n\nПример: «Аня, пт 14:00, коррекция» или «Маша завтра в 15 брови +79991234567»"
         )
+    return _save_visit(db, master, parsed, now, bot_username, text, via="text")
 
+
+def add_visit_from_forward(
+    db: DB, master, text: str, sender_name: str | None, written_at: int, now: int, bot_username: str
+) -> Reply:
+    """Мастер переслала сообщение клиентки вроде «давайте в пятницу в 14».
+
+    `sender_name` — имя из пересылки (None, если это сообщение самого мастера),
+    `written_at` — когда клиентка его написала: «завтра» считаем от этого момента.
+    """
+    if not sender_name:
+        return Reply(
+            "Это ваше сообщение — перешлите сообщение клиентки, где она называет день и время, "
+            "или напишите строкой: «Аня, пт 14:00, коррекция»"
+        )
+    if not text.strip():
+        return Reply("В пересланном сообщении нет текста. Напишите запись строкой: «Аня, пт 14:00, коррекция»")
+    try:
+        parsed = parse_forwarded(text, sender_name, local_dt(master, written_at).replace(tzinfo=None))
+    except ParseError as e:
+        return Reply(
+            f"🤔 В сообщении {h(sender_name)} не нашла день и время ({e}).\n"
+            f"Напишите строкой: «{h(sender_name)}, пт 14:00, коррекция»"
+        )
+    if to_ts(master, parsed.starts_at) <= now:
+        return Reply(f"Время из сообщения {h(sender_name)} уже прошло. Напишите запись строкой: «{h(sender_name)}, пт 14:00»")
+    reply = _save_visit(db, master, parsed, now, bot_username, text, via="forward")
+    reply.text += "\n\nПроверьте день и время: если клиентка договорилась иначе, отмените запись кнопкой ниже и напишите её строкой."
+    return reply
+
+
+def _save_visit(db: DB, master, parsed: ParsedVisit, now: int, bot_username: str, source: str, via: str) -> Reply:
     client = db.find_client(master["id"], parsed.name)
     if client is None:
         client_id = db.add_client(master["id"], parsed.name, parsed.phone)
@@ -100,7 +132,7 @@ def add_visit_from_text(db: DB, master, text: str, now: int, bot_username: str) 
     starts_at = to_ts(master, parsed.starts_at)
     visit_id = db.add_visit(master["id"], client_id, starts_at, parsed.service)
     db.cancel_pending_invites(client_id)  # уже записалась, приглашать не нужно
-    db.log("visit_added", master_id=master["id"], visit_id=visit_id, client_id=client_id, text=text)
+    db.log("visit_added", master_id=master["id"], visit_id=visit_id, client_id=client_id, text=source, via=via)
 
     lines = [f"✅ Записала: {h(client['name'])}, {fmt_when(master, starts_at)}, {h(parsed.service)}."]
     if client["tg_id"]:
@@ -424,6 +456,12 @@ def master_stats(db: DB, master, since: int, until: int) -> dict:
         "cancelled": _count_events(db, master["id"], ("client_cancelled",), since, until),
         "invites_sent": _count_events(db, master["id"], ("invite_sent",), since, until),
         "invites_booked": _count_events(db, master["id"], ("invite_book",), since, until),
+        "added": _count_events(db, master["id"], ("visit_added",), since, until),
+        "added_forward": db.conn.execute(
+            "SELECT COUNT(*) FROM events WHERE master_id = ? AND ts >= ? AND ts <= ? AND kind = 'visit_added'"
+            " AND json_extract(payload, '$.via') = 'forward'",
+            (master["id"], since, until),
+        ).fetchone()[0],
         "clients": len(clients),
         "clients_linked": sum(1 for c in clients if c["tg_id"]),
         "consents": sum(1 for c in clients if c["invite_consent"] == 1),
@@ -469,7 +507,8 @@ def pilot_summary(db: DB, now: int) -> str:
             f"\n• {h(m['name'])} (id {m['id']}): визитов {s['visits']}, неявок {s['no_show']} из {marked} ({rate}); "
             f"подтвердили {s['confirmed']}, перенос/отмена заранее {s['moved'] + s['cancelled']}; "
             f"клиенток в боте {linked}, согласий {s['consents']}; "
-            f"приглашений {s['invites_sent']} → хотят записаться {s['invites_booked']}"
+            f"приглашений {s['invites_sent']} → хотят записаться {s['invites_booked']}; "
+            f"записей добавлено {s['added']}, из них пересылкой {s['added_forward']}"
         )
     if len(lines) == 1:
         lines.append("пока нет мастеров")

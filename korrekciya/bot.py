@@ -11,7 +11,14 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    MessageOriginHiddenUser,
+    MessageOriginUser,
+)
 
 from . import logic
 from .db import DB
@@ -26,6 +33,8 @@ HELP = """Я помогаю не терять клиенток на неявка
 • Аня, пт 14:00, коррекция
 • Маша завтра в 15 брови
 • Оля 12.11 11:30 ламинирование +79991234567
+
+Или просто <b>перешлите мне сообщение клиентки</b>, где она называет день и время («давайте в пятницу в 14») — имя я возьму из пересылки.
 
 За сутки до визита я попрошу клиентку подтвердить запись, а вам сообщу, если она не ответила. После визита спрошу, пришла ли она — так в отчёте будет честная статистика.
 
@@ -172,6 +181,27 @@ def build_router(db: DB, notifier: TelegramNotifier, cfg: dict) -> Router:
             return
         db.update_master(m["id"], interval_days=int(arg))
         await message.answer(f"Буду приглашать на коррекцию через {arg} дней после визита (для ламинирования — не раньше чем через 42)")
+
+    @router.message(F.forward_origin)
+    async def forwarded(message: Message):
+        m = master_of(message)
+        if m is None:
+            await message.answer("Я только напоминаю о записях. Если хотите что-то спросить, напишите мастеру напрямую 🌸")
+            return
+        origin = message.forward_origin
+        if isinstance(origin, MessageOriginUser):
+            own = origin.sender_user.id == message.from_user.id
+            sender_name = None if own else origin.sender_user.first_name
+        elif isinstance(origin, MessageOriginHiddenUser):
+            # Клиентка скрыла аккаунт в пересылках — Telegram отдаёт только её имя.
+            sender_name = origin.sender_user_name.split()[0] if origin.sender_user_name.strip() else None
+        else:
+            sender_name = None
+        reply = logic.add_visit_from_forward(
+            db, m, message.text or message.caption or "", sender_name,
+            int(origin.date.timestamp()), int(time.time()), cfg["bot_username"],
+        )
+        await message.answer(reply.text, reply_markup=keyboard(reply.buttons), disable_web_page_preview=True)
 
     @router.message(F.voice)
     async def voice(message: Message):

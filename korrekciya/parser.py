@@ -22,8 +22,8 @@ MONTHS = {
 }
 
 PHONE_RE = re.compile(r"(?:\+7|8)[\s\-()]*\d{3}[\s\-()]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}")
-TIME_RE = re.compile(r"(?<![\d.])(?:в\s+)?([01]?\d|2[0-3])[:.]([0-5]\d)(?![\d.])")
-TIME_HOUR_RE = re.compile(r"(?<![\d.:])в\s+([01]?\d|2[0-3])(?![\d.:])")
+TIME_RE = re.compile(r"(?<![\d.])(?:[вк]\s+)?([01]?\d|2[0-3])[:.]([0-5]\d)(?![\d.])")
+TIME_HOUR_RE = re.compile(r"(?<![\d.:])[вк]\s+([01]?\d|2[0-3])(?![\d.:])")
 NUM_DATE_RE = re.compile(r"(?<![\d.])(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?(?![\d.])")
 WORD_DATE_RE = re.compile(r"(?<!\d)(\d{1,2})\s+(" + "|".join(MONTHS) + r")(?:\s+(\d{4}))?", re.I)
 WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё\-]+")
@@ -93,19 +93,16 @@ def _safe_date(year: int, month: int, day: int) -> date:
         raise ParseError(f"Не понимаю дату {day:02d}.{month:02d}") from e
 
 
-def parse_visit(text: str, now: datetime) -> ParsedVisit:
-    """Разбирает фразу мастера. `now` — текущее локальное время мастера (наивное)."""
-    original = text.strip()
-    if not original:
-        raise ParseError("Пустое сообщение")
-    text = original
-
-    phone = None
+def _extract_phone(text: str) -> tuple[str | None, str]:
     m = PHONE_RE.search(text)
-    if m:
-        phone = normalize_phone(m.group(0))
-        text = _cut(text, m)
+    if not m:
+        return None, text
+    return normalize_phone(m.group(0)), _cut(text, m)
 
+
+def extract_when(text: str, now: datetime) -> tuple[datetime, str]:
+    """Находит в тексте день и время визита. Возвращает их и текст без них."""
+    original = text
     # «14:00» однозначно время; «14.00» может быть датой, поэтому берём последнее совпадение.
     matches = list(TIME_RE.finditer(text))
     colon = [x for x in matches if ":" in x.group(0)]
@@ -130,6 +127,18 @@ def parse_visit(text: str, now: datetime) -> ParsedVisit:
         starts_at += timedelta(days=7)
     if starts_at <= now:
         raise ParseError("Это время уже прошло")
+    # Предлоги, оставшиеся от «в пятницу к 14:00», в имя и услугу не нужны.
+    text = re.sub(r"(?<!\S)(?:в|во|к|на)(?!\S)", " ", text, flags=re.I)
+    return starts_at, text
+
+
+def parse_visit(text: str, now: datetime) -> ParsedVisit:
+    """Разбирает фразу мастера. `now` — текущее локальное время мастера (наивное)."""
+    text = text.strip()
+    if not text:
+        raise ParseError("Пустое сообщение")
+    phone, text = _extract_phone(text)
+    starts_at, text = extract_when(text, now)
 
     parts = [p.strip(" ,;-—") for p in re.split(r"[,;]", text)]
     parts = [p for p in parts if p]
@@ -147,3 +156,18 @@ def parse_visit(text: str, now: datetime) -> ParsedVisit:
     if not WORD_RE.search(name):
         raise ParseError("Не вижу имя клиентки — начните сообщение с имени")
     return ParsedVisit(name=name[:1].upper() + name[1:], starts_at=starts_at, service=service, phone=phone)
+
+
+SERVICE_KEYWORDS = [
+    ("коррекц", "коррекция"), ("наращ", "наращивание"), ("ламин", "ламинирование"),
+    ("окраш", "окрашивание"), ("бров", "брови"), ("ресниц", "ресницы"),
+]
+
+
+def parse_forwarded(text: str, name: str, now: datetime) -> ParsedVisit:
+    """Разбирает пересланное сообщение клиентки («давайте в пятницу в 14»). Имя берётся из пересылки."""
+    phone, text = _extract_phone(text.strip())
+    starts_at, rest = extract_when(text, now)
+    low = rest.lower()
+    service = next((title for key, title in SERVICE_KEYWORDS if key in low), "визит")
+    return ParsedVisit(name=name.strip() or "Клиентка", starts_at=starts_at, service=service, phone=phone)

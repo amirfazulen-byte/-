@@ -159,10 +159,9 @@ def test_blocked_bot_falls_back(db):
 
 
 def test_fresh_booking_not_reminded(db):
-    add(db, "Аня сегодня 23:59") if time.localtime().tm_hour < 12 else add(db, "Аня завтра 08:00")
+    client_id = db.add_client(master(db)["id"], "Аня", None)
+    db.add_visit(master(db)["id"], client_id, int(time.time()) + 6 * HOUR, "коррекция")
     v = last_visit(db)
-    if v["starts_at"] - v["created_at"] >= logic.FRESH_BOOKING:
-        pytest.skip("время запуска теста не даёт «свежую» запись")
     n = FakeNotifier()
     run(logic.tick(db, n, v["starts_at"] - 2 * HOUR, "korr_bot"))
     assert db.get_visit(v["id"])["reminder_channel"] == "skipped"
@@ -222,3 +221,29 @@ def test_weekly_report_and_summary(db):
 def test_laminating_interval(db):
     assert logic.invite_interval_days(master(db), "Ламинирование ресниц") == 42
     assert logic.invite_interval_days(master(db), "коррекция") == 21
+
+
+def test_forwarded_client_message(db):
+    now = int(time.time())
+    reply = logic.add_visit_from_forward(db, master(db), "давайте послезавтра в 14 на коррекцию", "Аня", now, now, "korr_bot")
+    assert "Записала: Аня" in reply.text and "коррекция" in reply.text and "Проверьте день" in reply.text
+    ev = db.conn.execute("SELECT json_extract(payload, '$.via') FROM events WHERE kind='visit_added'").fetchone()[0]
+    assert ev == "forward"
+    # Повторная пересылка от той же клиентки находит её, а не создаёт новую
+    logic.add_visit_from_forward(db, master(db), "а ещё 01.12 в 10:00", "аня", now, now, "korr_bot")
+    assert len(db.clients_of(master(db)["id"])) == 1
+    assert "пересылкой 2" in logic.pilot_summary(db, now + 60)
+
+
+def test_forwarded_relative_day_counts_from_message_date(db):
+    now = int(time.time())
+    written = now - 3 * DAY
+    reply = logic.add_visit_from_forward(db, master(db), "давайте завтра в 14", "Аня", written, now, "korr_bot")
+    assert "уже прошло" in reply.text
+    assert db.conn.execute("SELECT COUNT(*) FROM visits").fetchone()[0] == 0
+
+
+def test_forwarded_own_message_and_no_time(db):
+    now = int(time.time())
+    assert "Это ваше сообщение" in logic.add_visit_from_forward(db, master(db), "жду в пт в 14", None, now, now, "b").text
+    assert "не нашла день и время" in logic.add_visit_from_forward(db, master(db), "а когда есть окно?", "Аня", now, now, "b").text

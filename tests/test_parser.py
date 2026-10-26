@@ -2,7 +2,7 @@ from datetime import datetime
 
 import pytest
 
-from korrekciya.parser import ParseError, parse_visit
+from korrekciya.parser import ParseError, parse_forwarded, parse_visit
 
 # Четверг, 22 октября 2026, 12:00
 NOW = datetime(2026, 10, 22, 12, 0)
@@ -74,3 +74,29 @@ def test_full_name():
 def test_errors(text):
     with pytest.raises(ParseError):
         parse_visit(text, NOW)
+
+
+@pytest.mark.parametrize(
+    "text, expected, service",
+    [
+        ("Давайте в пятницу в 14", datetime(2026, 10, 23, 14, 0), "визит"),
+        ("можно завтра к 11:30 на коррекцию?", datetime(2026, 10, 23, 11, 30), "коррекция"),
+        ("Здравствуйте! Хочу записаться на брови 28.10 в 16:00", datetime(2026, 10, 28, 16, 0), "брови"),
+        ("Удобно во вторник в 10", datetime(2026, 10, 27, 10, 0), "визит"),
+    ],
+)
+def test_forwarded_client_messages(text, expected, service):
+    v = parse_forwarded(text, "Аня", NOW)
+    assert v.name == "Аня"
+    assert v.starts_at == expected
+    assert v.service == service
+
+
+def test_forwarded_without_time():
+    with pytest.raises(ParseError):
+        parse_forwarded("Здравствуйте, когда есть окошко?", "Аня", NOW)
+
+
+def test_preposition_not_in_service():
+    v = parse_visit("Аня, пт к 14:00, на коррекцию", NOW)
+    assert v.service == "коррекцию"
