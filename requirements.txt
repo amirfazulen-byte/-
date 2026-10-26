@@ -1,2 +1,4 @@
 aiogram==3.31.0
 tzdata==2026.5
+anthropic==2.3.0
+cryptography==50.0.2
